@@ -50,21 +50,29 @@ class AuthNotifier extends Notifier<UserModel?> {
   Future<void> signIn() async {
     final repo = ref.read(repositoryProvider);
     state = await repo.signInWithGoogle();
+    // Clear cached groups when signing in with new user
+    ref.read(cachedGroupsProvider.notifier).state = [];
   }
 
   Future<void> signInWithEmail(String email, String password) async {
     final repo = ref.read(repositoryProvider);
     state = await repo.signInWithEmail(email, password);
+    // Clear cached groups when signing in with new user
+    ref.read(cachedGroupsProvider.notifier).state = [];
   }
 
   Future<void> signUpWithEmail(String email, String password, String displayName) async {
     final repo = ref.read(repositoryProvider);
     state = await repo.signUpWithEmail(email, password, displayName);
+    // Clear cached groups when signing up
+    ref.read(cachedGroupsProvider.notifier).state = [];
   }
 
   Future<void> signOut() async {
     final repo = ref.read(repositoryProvider);
     await repo.signOut();
+    // Clear cached groups when signing out
+    ref.read(cachedGroupsProvider.notifier).state = [];
     state = null;
   }
 }
@@ -122,4 +130,17 @@ final groupTodosProvider = StreamProvider.family<List<TodoModel>, String>((ref, 
 final groupEventsProvider = StreamProvider.family<List<EventModel>, String>((ref, groupId) {
   final repo = ref.watch(repositoryProvider);
   return repo.getGroupEvents(groupId);
+});
+
+// Notifications
+final userNotificationsProvider = StreamProvider<List<NotificationModel>>((ref) {
+  final user = ref.watch(currentUserProvider);
+  if (user == null) return const Stream.empty();
+  final repo = ref.watch(repositoryProvider);
+  return repo.getUserNotifications(user.id);
+});
+
+final unreadNotificationsCountProvider = Provider<int>((ref) {
+  final notifications = ref.watch(userNotificationsProvider).valueOrNull ?? [];
+  return notifications.where((n) => !n.read).length;
 });

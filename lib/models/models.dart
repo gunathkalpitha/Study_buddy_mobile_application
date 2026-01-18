@@ -297,3 +297,52 @@ class EventModel {
     );
   }
 }
+
+enum NotificationType { message, todo, reminder, group, system }
+
+class NotificationModel {
+  final String id;
+  final String title;
+  final String body;
+  final NotificationType type;
+  final DateTime timestamp;
+  final bool read;
+  final String? groupId;
+
+  NotificationModel({
+    required this.id,
+    required this.title,
+    required this.body,
+    required this.type,
+    required this.timestamp,
+    this.read = false,
+    this.groupId,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'title': title,
+      'body': body,
+      'type': type.name,
+      'timestamp': timestamp.toIso8601String(),
+      'read': read,
+      'groupId': groupId,
+    };
+  }
+
+  factory NotificationModel.fromMap(Map<String, dynamic> map, String id) {
+    return NotificationModel(
+      id: id,
+      title: map['title'] ?? '',
+      body: map['body'] ?? '',
+      type: NotificationType.values.firstWhere(
+        (e) => e.name == (map['type'] ?? 'system'),
+        orElse: () => NotificationType.system,
+      ),
+      timestamp: DateTime.tryParse(map['timestamp'].toString()) ?? DateTime.now(),
+      read: map['read'] ?? false,
+      groupId: map['groupId'],
+    );
+  }
+}

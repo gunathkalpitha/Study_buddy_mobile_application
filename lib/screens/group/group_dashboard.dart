@@ -1,5 +1,6 @@
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:study_buddy/providers/app_providers.dart';
@@ -189,8 +190,12 @@ class _GroupDashboardState extends ConsumerState<GroupDashboard> {
               OutlinedButton.icon(
                 onPressed: () {
                   // Leave group logic
-                  context.pop();
-                  context.pop();
+                  if (context.mounted) {
+                    context.pop();
+                    if (context.mounted) {
+                      context.pop();
+                    }
+                  }
                 },
                 icon: const Icon(Icons.exit_to_app, color: Colors.red),
                 label: const Text('Leave Group', style: TextStyle(color: Colors.red)),
@@ -235,11 +240,13 @@ class _InfoRow extends StatelessWidget {
         if (isCopyable)
           IconButton(
             icon: const Icon(Icons.copy, size: 20),
-            onPressed: () {
-              // Copy to clipboard
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: value));
+              if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Copied to clipboard')),
+                const SnackBar(content: Text('Invite code copied')), // quick feedback
               );
+              }
             },
           ),
       ],
