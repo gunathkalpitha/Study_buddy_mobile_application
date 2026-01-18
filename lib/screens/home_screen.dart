@@ -1,5 +1,6 @@
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_animate/flutter_animate.dart';
@@ -19,14 +20,18 @@ class HomeScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('Study Buddy'),
         actions: [
-          IconButton(
-            icon: Badge(
-              backgroundColor: Colors.red,
-              label: const Text('3'),
-              child: const Icon(Icons.notifications_outlined),
-            ),
-            onPressed: () {
-              // Show notifications
+          Consumer(
+            builder: (context, ref, _) {
+              final unread = ref.watch(unreadNotificationsCountProvider);
+              return IconButton(
+                icon: Badge(
+                  isLabelVisible: unread > 0,
+                  backgroundColor: Colors.red,
+                  label: Text(unread.toString()),
+                  child: const Icon(Icons.notifications_outlined),
+                ),
+                onPressed: () => _showNotificationsSheet(context, ref),
+              );
             },
           ),
           const SizedBox(width: 8),
@@ -114,11 +119,24 @@ class HomeScreen extends ConsumerWidget {
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (err, stack) => Center(child: Text('Error: $err')),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        heroTag: 'create_group_fab',
-        onPressed: () => _showCreateGroupDialog(context, ref),
-        icon: const Icon(Icons.add),
-        label: const Text('New Group'),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton.extended(
+            heroTag: 'join_group_fab',
+            onPressed: () => _showJoinGroupDialog(context, ref),
+            icon: const Icon(Icons.login),
+            label: const Text('Join Group'),
+          ),
+          const SizedBox(height: 12),
+          FloatingActionButton.extended(
+            heroTag: 'create_group_fab',
+            onPressed: () => _showCreateGroupDialog(context, ref),
+            icon: const Icon(Icons.add),
+            label: const Text('New Group'),
+          ),
+        ],
       ),
     );
   }
@@ -231,53 +249,210 @@ class HomeScreen extends ConsumerWidget {
     );
   }
 
+  void _showNotificationsSheet(BuildContext context, WidgetRef ref) {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => Consumer(
+        builder: (context, ref, _) {
+          final notificationsAsync = ref.watch(userNotificationsProvider);
+          return notificationsAsync.when(
+            data: (items) {
+              if (items.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: Text('No notifications yet')),
+                );
+              }
+              return ListView.separated(
+                padding: const EdgeInsets.all(16),
+                itemCount: items.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  final n = items[index];
+                  return ListTile(
+                    leading: Icon(
+                      _iconForNotification(n.type),
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    title: Text(n.title),
+                    subtitle: Text(n.body),
+                    trailing: n.read
+                        ? null
+                        : Chip(
+                            label: const Text('New'),
+                            visualDensity: VisualDensity.compact,
+                            backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                          ),
+                    onTap: () async {
+                      final user = ref.read(currentUserProvider);
+                      if (user != null) {
+                        await ref.read(repositoryProvider).markNotificationRead(user.id, n.id);
+                      }
+                      if (n.groupId != null) {
+                        ref.read(currentGroupProvider.notifier).setGroup(null);
+                        if (context.mounted) {
+                          context.push('/group/${n.groupId}');
+                        }
+                      }
+                    },
+                  );
+                },
+              );
+            },
+            loading: () => const Padding(
+              padding: EdgeInsets.all(24),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+            error: (err, _) => Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text('Error loading notifications: $err'),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  IconData _iconForNotification(NotificationType type) {
+    switch (type) {
+      case NotificationType.message:
+        return Icons.chat_bubble_outline;
+      case NotificationType.todo:
+        return Icons.check_circle_outline;
+      case NotificationType.reminder:
+        return Icons.alarm;
+      case NotificationType.group:
+        return Icons.group_outlined;
+      case NotificationType.system:
+        return Icons.notifications_outlined;
+    }
+  }
+
   void _showJoinGroupDialog(BuildContext context, WidgetRef ref) {
     final codeController = TextEditingController();
+    bool isLoading = false;
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Join Study Group'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: codeController,
-              decoration: const InputDecoration(labelText: 'Invite Code', hintText: 'Enter 8-char code'),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Join Study Group'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: codeController,
+                enabled: !isLoading,
+                textCapitalization: TextCapitalization.characters,
+                maxLength: 8,
+                decoration: InputDecoration(
+                  labelText: 'Invite Code',
+                  hintText: 'ABC12345',
+                  counterText: '',
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.paste),
+                    tooltip: 'Paste from clipboard',
+                    onPressed: isLoading ? null : () async {
+                      final data = await Clipboard.getData(Clipboard.kTextPlain);
+                      if (data?.text != null) {
+                        codeController.text = data!.text!.trim().toUpperCase();
+                      }
+                    },
+                  ),
+                ),
+              ),
+              if (isLoading)
+                const Padding(
+                  padding: EdgeInsets.only(top: 16),
+                  child: LinearProgressIndicator(),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: isLoading ? null : () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
             ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => context.pop(), child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () async {
-              if (codeController.text.isNotEmpty) {
-                final user = ref.read(currentUserProvider);
-                if (user != null) {
-                  final group = await ref.read(repositoryProvider).joinGroup(
-                        codeController.text,
-                        user.id,
-                      );
+            FilledButton(
+              onPressed: isLoading ? null : () async {
+                final code = codeController.text.trim().toUpperCase();
+                if (code.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Please enter an invite code')),
+                  );
+                  return;
+                }
+
+                setState(() => isLoading = true);
+
+                try {
+                  final user = ref.read(currentUserProvider);
+                  if (user == null) {
+                    throw Exception('User not logged in');
+                  }
+
+                  final group = await ref.read(repositoryProvider).joinGroup(code, user.id);
+                  
                   if (group != null) {
+                    // Add to cached groups for instant display
+                    ref.read(cachedGroupsProvider.notifier).update((groups) {
+                      final map = {for (final g in groups) g.id: g};
+                      map[group.id] = group;
+                      return map.values.toList();
+                    });
+                    
+                    // Invalidate to refresh from server
                     ref.invalidate(userGroupsProvider);
-                    if (context.mounted) {
-                      context.pop();
+                    
+                    if (dialogContext.mounted) {
+                      Navigator.pop(dialogContext);
+                      
+                      // Show success message
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Successfully joined "${group.name}"!'),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
+                      
+                      // Navigate to group
                       ref.read(currentGroupProvider.notifier).setGroup(group);
                       context.push('/group/${group.id}');
                     }
                   } else {
+                    setState(() => isLoading = false);
                     if (context.mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Invalid invite code or already joined.')),
+                        const SnackBar(
+                          content: Text('Invalid or expired invite code. Please check and try again.'),
+                          backgroundColor: Colors.orange,
+                        ),
                       );
                     }
                   }
+                } catch (e) {
+                  setState(() => isLoading = false);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Error: ${e.toString()}'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                  }
                 }
-              }
-            },
-            child: const Text('Join'),
-          ),
-        ],
+              },
+              child: isLoading
+                  ? const SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Join'),
+            ),
+          ],
+        ),
       ),
     );
   }

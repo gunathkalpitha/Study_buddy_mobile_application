@@ -100,7 +100,16 @@ class _ChatTabState extends ConsumerState<ChatTab> {
               );
             },
             loading: () => const Center(child: CircularProgressIndicator()),
-            error: (err, stack) => Center(child: Text('Error loading chat')),
+            error: (err, stack) => Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text('Error loading chat: $err'),
+                  const SizedBox(height: 8),
+                  Text(stack.toString(), style: const TextStyle(fontSize: 10)),
+                ],
+              ),
+            ),
           ),
         ),
         _buildInputArea(context),

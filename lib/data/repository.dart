@@ -36,6 +36,10 @@ abstract class Repository {
   
   Stream<List<EventModel>> getGroupEvents(String groupId);
   Future<void> addEvent(String groupId, EventModel event);
+
+  // Notifications
+  Stream<List<NotificationModel>> getUserNotifications(String userId);
+  Future<void> markNotificationRead(String userId, String notificationId);
 }
 
 class FirebaseRepository implements Repository {
@@ -173,9 +177,16 @@ class FirebaseRepository implements Repository {
         'email': email,
         'photoUrl': user.photoURL ?? '',
         'groupIds': [],
+        'emailVerified': user.emailVerified,
         'createdAt': DateTime.now().toIso8601String(),
         'studyHours': 0.0,
       }, SetOptions(merge: true));
+      
+      // Fetch the newly created doc
+      final newDoc = await _safeUserDoc(user.uid);
+      if (newDoc != null && newDoc.exists) {
+        return _fromFirestoreDoc(user, newDoc.data()!);
+      }
     } catch (_) {
       // Ignore failures to keep sign-in fast
     }
@@ -258,16 +269,17 @@ class FirebaseRepository implements Repository {
 
     final userDoc = _firestore.collection('users').doc(user.uid);
     final docSnapshot = await userDoc.get();
-    final existingData = docSnapshot.data() ?? {};
     
+    // Create or update user document
     await userDoc.set({
       'id': user.uid,
       'name': user.displayName ?? 'User',
       'email': user.email ?? '',
       'photoUrl': user.photoURL ?? '',
-      'groupIds': existingData['groupIds'] ?? [],
-      'createdAt': existingData['createdAt'] ?? DateTime.now().toIso8601String(),
-      'studyHours': existingData['studyHours'] ?? 0.0,
+      'groupIds': docSnapshot.exists ? (docSnapshot.data()?['groupIds'] ?? []) : [],
+      'emailVerified': user.emailVerified,
+      'createdAt': docSnapshot.exists ? (docSnapshot.data()?['createdAt'] ?? DateTime.now().toIso8601String()) : DateTime.now().toIso8601String(),
+      'studyHours': docSnapshot.exists ? (docSnapshot.data()?['studyHours'] ?? 0.0) : 0.0,
     }, SetOptions(merge: true));
 
     final freshDoc = await userDoc.get();
@@ -517,14 +529,22 @@ class FirebaseRepository implements Repository {
   @override
   Future<GroupModel?> joinGroup(String inviteCode, String userId) async {
     try {
+      // Normalize invite code
+      final normalizedCode = inviteCode.trim().toUpperCase();
+      
       final groups = await _firestore
           .collection('groups')
-          .where('inviteCode', isEqualTo: inviteCode)
+          .where('inviteCode', isEqualTo: normalizedCode)
           .limit(1)
           .get()
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 8)); // Increased timeout for reliability
 
-      if (groups.docs.isEmpty) return null;
+      if (groups.docs.isEmpty) {
+        if (kDebugMode) {
+          print('No group found with invite code: $normalizedCode');
+        }
+        return null;
+      }
 
       final groupDoc = groups.docs.first;
       final data = groupDoc.data();
@@ -534,29 +554,46 @@ class FirebaseRepository implements Repository {
       if (inviteExpiryStr != null) {
         final inviteExpiry = DateTime.parse(inviteExpiryStr);
         if (DateTime.now().isAfter(inviteExpiry)) {
+          if (kDebugMode) {
+            print('Invite code has expired: $normalizedCode');
+          }
           return null; // Invite link has expired
         }
       }
       
       final memberIds = List<String>.from(data['memberIds'] ?? []);
 
-      if (!memberIds.contains(userId)) {
-        await groupDoc.reference
-            .update({'memberIds': FieldValue.arrayUnion([userId])})
-            .timeout(const Duration(seconds: 5));
-
-        // Use set with merge to create doc if it doesn't exist
-        await _firestore
-            .collection('users')
-            .doc(userId)
-            .set(
-              {'groupIds': FieldValue.arrayUnion([groupDoc.id])},
-              SetOptions(merge: true),
-            )
-            .timeout(const Duration(seconds: 5));
-
-        memberIds.add(userId);
+      // Check if user is already a member
+      if (memberIds.contains(userId)) {
+        // Already a member, just return the group
+        return GroupModel(
+          id: groupDoc.id,
+          name: data['name'] ?? '',
+          description: data['description'] ?? '',
+          adminId: data['adminId'] ?? '',
+          memberIds: memberIds,
+          inviteCode: data['inviteCode'] ?? '',
+          createdAt: DateTime.parse(data['createdAt'] ?? DateTime.now().toIso8601String()),
+          subject: data['subject'] ?? '',
+        );
       }
+
+      // Add user to group
+      await groupDoc.reference
+          .update({'memberIds': FieldValue.arrayUnion([userId])})
+          .timeout(const Duration(seconds: 8));
+
+      // Add group to user's groupIds
+      await _firestore
+          .collection('users')
+          .doc(userId)
+          .set(
+            {'groupIds': FieldValue.arrayUnion([groupDoc.id])},
+            SetOptions(merge: true),
+          )
+          .timeout(const Duration(seconds: 8));
+
+      memberIds.add(userId);
 
       return GroupModel(
         id: groupDoc.id,
@@ -569,6 +606,9 @@ class FirebaseRepository implements Repository {
         subject: data['subject'] ?? '',
       );
     } on TimeoutException {
+      if (kDebugMode) {
+        print('Timeout while joining group with code: $inviteCode');
+      }
       return null;
     } on FirebaseException catch (e) {
       if (e.code == 'unavailable') return null;
@@ -584,20 +624,36 @@ class FirebaseRepository implements Repository {
         .collection('messages')
         .orderBy('timestamp', descending: false)
         .snapshots()
-        .map((snapshot) => snapshot.docs.map((doc) {
+        .handleError((error) {
+          if (kDebugMode) {
+            print('ERROR fetching messages for group $groupId: $error');
+          }
+        })
+        .map((snapshot) {
+          try {
+            return snapshot.docs.map((doc) {
               final data = doc.data();
               return MessageModel(
                 id: doc.id,
                 text: data['text'] ?? '',
                 senderId: data['senderId'] ?? '',
                 senderName: data['senderName'] ?? '',
-                timestamp: DateTime.parse(data['timestamp'] ?? DateTime.now().toIso8601String()),
+                timestamp: data['timestamp'] != null 
+                    ? DateTime.parse(data['timestamp'])
+                    : DateTime.now(),
                 type: MessageType.values.firstWhere(
-                  (e) => e.name == data['type'],
+                  (e) => e.name == (data['type'] ?? 'text'),
                   orElse: () => MessageType.text,
                 ),
               );
-            }).toList());
+            }).toList();
+          } catch (e) {
+            if (kDebugMode) {
+              print('ERROR parsing messages: $e');
+            }
+            rethrow;
+          }
+        });
   }
 
   @override
@@ -623,7 +679,14 @@ class FirebaseRepository implements Repository {
         .collection('files')
         .orderBy('timestamp', descending: true)
         .snapshots()
-        .map((snapshot) => snapshot.docs.map((doc) {
+        .handleError((error) {
+          if (kDebugMode) {
+            print('ERROR fetching files for group $groupId: $error');
+          }
+        })
+        .map((snapshot) {
+          try {
+            return snapshot.docs.map((doc) {
               final data = doc.data();
               return FileModel(
                 id: doc.id,
@@ -632,10 +695,19 @@ class FirebaseRepository implements Repository {
                 type: data['type'] ?? '',
                 uploadedBy: data['uploadedBy'] ?? '',
                 uploadedByName: data['uploadedByName'] ?? '',
-                timestamp: DateTime.parse(data['timestamp'] ?? DateTime.now().toIso8601String()),
+                timestamp: data['timestamp'] != null 
+                    ? DateTime.parse(data['timestamp'])
+                    : DateTime.now(),
                 sizeBytes: data['sizeBytes'] ?? 0,
               );
-            }).toList());
+            }).toList();
+          } catch (e) {
+            if (kDebugMode) {
+              print('ERROR parsing files: $e');
+            }
+            return [];
+          }
+        });
   }
 
   @override
@@ -674,7 +746,14 @@ class FirebaseRepository implements Repository {
         .collection('todos')
         .orderBy('createdAt', descending: false)
         .snapshots()
-        .map((snapshot) => snapshot.docs.map((doc) {
+        .handleError((error) {
+          if (kDebugMode) {
+            print('ERROR fetching todos for group $groupId: $error');
+          }
+        })
+        .map((snapshot) {
+          try {
+            return snapshot.docs.map((doc) {
               final data = doc.data();
               return TodoModel(
                 id: doc.id,
@@ -682,12 +761,19 @@ class FirebaseRepository implements Repository {
                 completed: data['completed'] ?? false,
                 createdBy: data['createdBy'] ?? '',
                 priority: PriorityLevel.values.firstWhere(
-                  (e) => e.name == data['priority'],
+                  (e) => e.name == (data['priority'] ?? 'low'),
                   orElse: () => PriorityLevel.low,
                 ),
                 dueDate: data['dueDate'] != null ? DateTime.parse(data['dueDate']) : null,
               );
-            }).toList());
+            }).toList();
+          } catch (e) {
+            if (kDebugMode) {
+              print('ERROR parsing todos: $e');
+            }
+            return [];
+          }
+        });
   }
 
   @override
@@ -736,17 +822,74 @@ class FirebaseRepository implements Repository {
         .collection('events')
         .orderBy('date', descending: false)
         .snapshots()
-        .map((snapshot) => snapshot.docs.map((doc) {
+        .handleError((error) {
+          if (kDebugMode) {
+            print('ERROR fetching events for group $groupId: $error');
+          }
+        })
+        .map((snapshot) {
+          try {
+            return snapshot.docs.map((doc) {
               final data = doc.data();
               return EventModel(
                 id: doc.id,
                 title: data['title'] ?? '',
                 description: data['description'] ?? '',
-                date: DateTime.parse(data['date'] ?? DateTime.now().toIso8601String()),
+                date: data['date'] != null
+                    ? DateTime.parse(data['date'])
+                    : DateTime.now(),
                 type: data['type'] ?? '',
                 createdBy: data['createdBy'] ?? '',
               );
-            }).toList());
+            }).toList();
+          } catch (e) {
+            if (kDebugMode) {
+              print('ERROR parsing events: $e');
+            }
+            return [];
+          }
+        });
+  }
+
+  // Notifications -----------------------------------------------------
+
+  @override
+  Stream<List<NotificationModel>> getUserNotifications(String userId) {
+    return _firestore
+        .collection('users')
+        .doc(userId)
+        .collection('notifications')
+        .orderBy('timestamp', descending: true)
+        .limit(50)
+        .snapshots()
+        .handleError((error) {
+          if (kDebugMode) {
+            print('ERROR fetching notifications for user $userId: $error');
+          }
+        })
+        .map((snapshot) {
+          try {
+            return snapshot.docs
+                .map((doc) => NotificationModel.fromMap(doc.data(), doc.id))
+                .toList();
+          } catch (e) {
+            if (kDebugMode) {
+              print('ERROR parsing notifications: $e');
+            }
+            return <NotificationModel>[];
+          }
+        });
+  }
+
+  @override
+  Future<void> markNotificationRead(String userId, String notificationId) async {
+    await _firestore
+        .collection('users')
+        .doc(userId)
+        .collection('notifications')
+        .doc(notificationId)
+        .set({'read': true}, SetOptions(merge: true))
+        .timeout(const Duration(seconds: 5));
   }
 
   @override
