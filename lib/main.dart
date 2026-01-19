@@ -8,6 +8,23 @@ import 'theme.dart';
 import 'nav.dart';
 import 'providers/app_providers.dart';
 
+// Helper function to safely initialize Firebase
+Future<FirebaseApp> _initFirebaseForWidget() async {
+  try {
+    if (Firebase.apps.isNotEmpty) {
+      return Firebase.apps.first;
+    }
+    return await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  } catch (e) {
+    if (!e.toString().contains('already exists')) {
+      rethrow;
+    }
+    return Firebase.apps.first;
+  }
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
@@ -19,7 +36,7 @@ Future<void> main() async {
         persistenceEnabled: true,
         cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
       );
-    } catch (_) {}
+    } catch (_) {} // Silently catch Firebase already initialized errors
   });
   
   // Run app immediately
@@ -34,9 +51,7 @@ class MyApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return FutureBuilder(
-      future: Firebase.initializeApp(
-        options: DefaultFirebaseOptions.currentPlatform,
-      ),
+      future: _initFirebaseForWidget(),
       builder: (context, snapshot) {
         // Show loading indicator while Firebase initializes
         if (snapshot.connectionState == ConnectionState.waiting) {
